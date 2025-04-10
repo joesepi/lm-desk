@@ -24,11 +24,13 @@ brew_bin=$(find_cmd_bin brew || true)
 ollama_bin=$(find_cmd_bin ollama || true)
 git_bin=$(find_cmd_bin git || true)
 code_bin=$(find_cmd_bin code || true)
+uv_bin=$(find_cmd_bin uv || true)
 jq_bin=$(find_cmd_bin jq || true)
 install_path=""
-chat_model="granite-code:8b"
-autocomplete_model="granite-code:3b"
+chat_model="granite3.2:8b"
+autocomplete_model="granite3.2:2b"
 dry_run="0"
+run_open_webui="0"
 
 # If running without a TTY, always assume 'yes'
 if [[ -t 1 ]]
@@ -53,7 +55,8 @@ Options:
     -p, --chat-model         Specify the path to chat model (default is ${chat_model})
     -a, --autocomplete-model Specify the path to autocomplete model (default is ${autocomplete_model})
     -y, --yes                Skip confirmation prompt
-    -n, --dry-run            Run without installing anything"
+    -n, --dry-run            Run without installing anything
+    -r, --run-owui           Run open web ui"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -102,6 +105,9 @@ while [ $# -gt 0 ]; do
             ;;
         --dry-run|-n)
             dry_run="1"
+            ;;
+        --run-owui|-r)
+            run_open_webui="1"
             ;;
         *)
             echo "Invalid argument: $1" >&2
@@ -321,9 +327,9 @@ function report_installed {
     brown "- curl: $curl_bin"
     brown "- brew: $brew_bin"
     brown "- ollama: $ollama_bin"
+    brown "- uv: $uv_bin"
     brown "- git: $git_bin"
     brown "- code: $code_bin"
-    brown "- jq: $jq_bin"
     brown $(term_bar -)
 }
 
@@ -379,6 +385,15 @@ function install_ollama_brew {
     ollama_bin=$(find_cmd_bin ollama)
 }
 
+#----
+# Install uv with homebrew
+#----
+function install_uv_brew {
+    echo "Using brew ($brew_bin)"
+    run $brew_bin install uv
+    uv_bin=$(find_cmd_bin uv)
+}
+
 
 #----
 # Install ollama with curl from github
@@ -406,6 +421,25 @@ function install_ollama_curl {
         ollama_bin="$(find_cmd_bin ollama)"
     else
         fail "Cannot install ollama using curl with OS[$OS]/ARCH[$ARCH]"
+    fi
+}
+
+#----
+# Install uv with curl 
+#----
+function install_uv_curl {
+    echo "Installing uv with curl"
+    
+    if [ "$OS" == "Darwin" ]
+    then
+        echo "Installing on darwin -- not ready yet"
+    elif [ "$OS" == "Linux" ]
+    then
+        echo "Installing on linux"
+        run curl -LsSf https://astral.sh/uv/install.sh | sh
+        uv_bin="$(find_cmd_bin uv)"
+    else
+        fail "Cannot install uv using curl with OS[$OS]/ARCH[$ARCH]"
     fi
 }
 
@@ -468,125 +502,26 @@ function pull_models {
 
 
 #----
-# Install continue into VS Code
+# Install uv 
 #----
-function install_continue {
-    if "$code_bin" --list-extensions | grep continue\.continue &>/dev/null
+function install_uv {
+    green "$(term_bar -)"
+    bold green "INSTALLING UV"
+    green "$(term_bar -)"
+
+    # If brew is available use brew
+    if [ "$brew_bin" != "" ]
     then
-        blue "Continue already installed in Visual Studio Code"
+        install_uv_brew
+    # Otherwise, use curl to pull from GH release directly
     else
-        green "$(term_bar -)"
-        bold green "INSTALLING CONTINUE"
-        green "$(term_bar -)"
-        run "$code_bin" --install-extension "continue.continue"
+        install_uv_curl
     fi
 }
 
-#----
-# Install jq
-#----
-function install_jq {
-    green "$(term_bar -)"
-    bold green "INSTALLING JQ"
-    green "$(term_bar -)"
-
-    if [ "$curl_bin" != "" ]
-    then
-        green "Downloading temporary jq"
-        plat=""
-        if [ "$OS" == "Darwin" ]
-        then
-            plat="macos"
-        elif [ "$OS" == "Linux" ]
-        then
-            plat="linux"
-        else
-            fail "Cannot install jq on $OS"
-        fi
-        suffix=""
-        if [ "$ARCH" == "arm64" ]
-        then
-            suffix="arm64"
-        elif [ "$ARCH" == "x86_64" ]
-        then
-            suffix="amd64"
-        else
-            bold red "Unable to install jq"
-        fi
-        if [ "$suffix" != "" ]
-        then
-            latest_jq_release=$(
-                "$curl_bin" -s https://api.github.com/repos/jqlang/jq/releases/latest | \
-                    grep '"tag_name":' | \
-                    sed -E 's/.*"([^"]+)".*/\1/'
-            )
-            blue "Latest jq release: $latest_jq_release"
-            run "$curl_bin" -L https://github.com/jqlang/jq/releases/download/${latest_jq_release}/jq-${plat}-${suffix} -o jq
-            run chmod +x jq
-            temp_bin=$(mktemp -d)
-            jq_bin=$"$temp_bin/jq"
-            mv jq $jq_bin
-        fi
-    else
-        green "Installing jq with brew"
-        run "$brew_bin" install jq
-        jq_bin="$(find_cmd_bin jq)"
-    fi
-}
-
-#----
-# Configure continue to use the desired models
-#----
-function configure_continue {
-    green "$(term_bar -)"
-    bold green "CONFIGURING CONTINUE"
-    green "- Chat Model: $chat_model"
-    green "- Autocomplete Model: $autocomplete_model"
-    green "$(term_bar -)"
-
-    # Check preconditions
-    if [ "$jq_bin" == "" ]
-    then
-        fail "Cannot configure continue without jq"
-    fi
-    if [ "$continue_config" == "" ] || ! [ -f "$continue_config" ]
-    then
-        fail "Cannot configure continue before installing it"
-    fi
-
-    # Add the chat model to the front of the list if needed
-    updated_config=$(cat "$continue_config")
-    if [ "$(echo "$updated_config" | "$jq_bin" ".models[] | select(.title == \"${chat_model}\")")" == "" ]
-    then
-        current_models=$(echo "$updated_config" | "$jq_bin" -r '.models')
-        updated_config=$(
-            echo "$updated_config" \
-            | "$jq_bin" ".models = []" \
-            | "$jq_bin" ".models += [{\"title\": \"$chat_model\", \"provider\": \"ollama\", \"model\": \"$chat_model\"}]" \
-            | "$jq_bin" ".models += $current_models"
-        )
-    else
-        blue "Found existing 'models' entry named '$chat_model'"
-    fi
-
-    # Set the autocomplete model
-    updated_config=$(
-        echo "$updated_config" \
-        | "$jq_bin" ".tabAutocompleteModel = {\"title\": \"$autocomplete_model\", \"provider\":\"ollama\", \"model\": \"$autocomplete_model\"}"
-    )
-
-    if [ "$dry_run" == "1" ]
-    then
-        magenta "DRY RUN: Updated config"
-        echo "$updated_config" | "$jq_bin"
-    else
-        echo "$updated_config"  | "$jq_bin" > $continue_config
-    fi
-}
 
 ## Main ########################################################################
 report_installed
-
 
 #######################################
 # Install curl to install other tools #
@@ -634,39 +569,21 @@ then
     pull_models
 fi
 
-#########################################################
-# Install continue into VS Code if VS Code is installed #
-#########################################################
-have_continue=0
-if [ "$code_bin" != "" ] && yes_no_prompt "Install continue?"
+############################
+# Install uv if needed #
+############################
+if [ "$uv_bin" == "" ] && yes_no_prompt "Install uv?"
 then
-    install_continue
-    have_continue=1
-fi
-
-
-##########################################
-# Install jq if needed for configuration #
-##########################################
-continue_config="$HOME/.continue/config.json"
-if [ "$jq_bin" == "" ] && [ "$have_continue" == "1" ] && [ -f $continue_config ] && yes_no_prompt "Install jq?"
-then
-    install_jq
-    report_installed
-fi
-
-################################################
-# Configure continue to use the desired models #
-################################################
-if [ "$have_continue" ] && [ -f $continue_config ] && [ "$jq_bin" != "" ] && yes_no_prompt "Configure continue?"
-then
-    configure_continue
+    install_uv
     report_installed
 fi
 
 
-################################
-# Install ollama-bar if needed #
-################################
-# if ! [ -d "/Applications/ollama-bar.app" ]
-
+############################
+# Run everything 
+############################
+if [ "$run_open_webui" == "0" ] && yes_no_prompt "Run Openwebui?"
+then
+    run $ollama_bin start |
+    run $uv_bin run https://raw.githubusercontent.com/ibm/lm-desk/refs/heads/main/scripts/openwebui.py
+fi
